@@ -15,7 +15,7 @@ import androidx.media3.exoplayer.offline.DownloadManager
 import androidx.media3.exoplayer.offline.DownloadNotificationHelper
 import androidx.media3.exoplayer.offline.DownloadRequest
 import androidx.media3.exoplayer.offline.DownloadService
-import coil3.ImageLoader
+import coil3.SingletonImageLoader
 import coil3.request.CachePolicy
 import coil3.request.ImageRequest
 import com.maxrave.common.MERGING_DATA_TYPE
@@ -190,6 +190,20 @@ internal class DownloadUtils(
     override val downloadTask: StateFlow<Map<String, Int>> get() = _downloadTask
     val downloadingVideoIds = MutableStateFlow<MutableSet<String>>(mutableSetOf())
 
+    // Fork: Media3 calls onDownloadChanged on every progress tick, not just on state transitions.
+    // Writing the same downloadState to Room on every tick invalidates the whole song table each
+    // time, so every song-list Flow re-queries and every screen recomposes constantly — the
+    // unbearable GUI lag while downloading. A state is therefore persisted only when it actually
+    // changes for that track. Guarded by a concurrent map because the progress callbacks arrive on
+    // the download threads while the collector runs on IO.
+    private val lastPersistedDownloadState = java.util.concurrent.ConcurrentHashMap<String, Int>()
+
+    private suspend fun persistDownloadState(videoId: String, state: Int) {
+        if (lastPersistedDownloadState[videoId] == state) return
+        lastPersistedDownloadState[videoId] = state
+        songRepository.updateDownloadState(videoId, state)
+    }
+
     /**
      * Use thumbnail to check video or audio
      */
@@ -205,7 +219,9 @@ internal class DownloadUtils(
                 .data(thumbnail)
                 .diskCachePolicy(CachePolicy.ENABLED)
                 .build()
-        val imageResult = ImageLoader(context).execute(request)
+        // Fork: the shared loader, not a fresh ImageLoader per track — each constructed instance
+        // carries its own caches, so per-track instances were pure memory churn on top of IO.
+        val imageResult = SingletonImageLoader.get(context).execute(request)
         if (imageResult.image?.height != imageResult.image?.width && imageResult.image != null) {
             isVideo = true
         }
@@ -293,10 +309,10 @@ internal class DownloadUtils(
                                     remove(videoId)
                                 }
                             }
-                            songRepository.updateDownloadState(videoId, DownloadState.STATE_DOWNLOADED)
+                            persistDownloadState(videoId, DownloadState.STATE_DOWNLOADED)
                         }
                         DownloadState.STATE_DOWNLOADING -> {
-                            songRepository.updateDownloadState(videoId, DownloadState.STATE_DOWNLOADING)
+                            persistDownloadState(videoId, DownloadState.STATE_DOWNLOADING)
                         }
                         DownloadState.STATE_NOT_DOWNLOADED -> {
                             downloadingVideoIds.update {
@@ -304,10 +320,10 @@ internal class DownloadUtils(
                                     remove(videoId)
                                 }
                             }
-                            songRepository.updateDownloadState(videoId, DownloadState.STATE_NOT_DOWNLOADED)
+                            persistDownloadState(videoId, DownloadState.STATE_NOT_DOWNLOADED)
                         }
                         DownloadState.STATE_PREPARING -> {
-                            songRepository.updateDownloadState(videoId, DownloadState.STATE_PREPARING)
+                            persistDownloadState(videoId, DownloadState.STATE_PREPARING)
                         }
                     }
                 }
@@ -382,7 +398,9 @@ internal class DownloadUtils(
                                             add(songId)
                                         }
                                     }
-                                    songRepository.updateDownloadState(songId, DownloadState.STATE_DOWNLOADING)
+                                    // Fork: gated — this branch runs on every progress tick, and an
+                                    // unguarded write would invalidate the song table each time.
+                                    persistDownloadState(songId, DownloadState.STATE_DOWNLOADING)
                                 }
                             }
                             else -> {
