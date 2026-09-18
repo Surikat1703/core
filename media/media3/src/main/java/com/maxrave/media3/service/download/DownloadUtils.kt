@@ -171,7 +171,9 @@ internal class DownloadUtils(
             dataSourceFactory,
             Executor(Runnable::run),
         ).apply {
-            maxParallelDownloads = 20
+            // Fork: 20 parallel downloads thrashed disk and network on a phone and multiplied the
+            // progress-tick storm by 20. Four lanes keep full speed on mobile links without jank.
+            maxParallelDownloads = 4
             minRetryCount = 3
             addListener(
                 MusicDownloadService.TerminalStateNotificationHelper(

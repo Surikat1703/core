@@ -307,7 +307,7 @@ internal class SongRepositoryImpl(
     override suspend fun updateDownloadState(
         videoId: String,
         downloadState: Int,
-    ) = withContext(Dispatchers.Main) {
+    ) = withContext(Dispatchers.IO) {
         localDataSource.updateDownloadState(
             downloadState,
             videoId,
