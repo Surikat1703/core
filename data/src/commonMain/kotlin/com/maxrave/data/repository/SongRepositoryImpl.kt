@@ -287,6 +287,18 @@ internal class SongRepositoryImpl(
 //        }
     }
 
+    /**
+     * Fork: local flag only — see SongRepository.setLocalLiked. The Liked mood stamps every
+     * track it plays so the mix-cache eviction never deletes a liked song, even when the
+     * YouTube Liked fetch is unreachable behind a VPN.
+     */
+    override suspend fun setLocalLiked(
+        videoId: String,
+        liked: Boolean,
+    ) = withContext(Dispatchers.IO) {
+        localDataSource.updateLiked(if (liked) 1 else 0, videoId)
+    }
+
     override fun updateSongInLibrary(
         inLibrary: LocalDateTime,
         videoId: String,

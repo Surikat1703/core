@@ -83,6 +83,16 @@ interface SongRepository {
         likeStatus: Int,
     )
 
+    /**
+     * Fork: sets only the local liked flag, with no side effects. updateLikeStatus can start a
+     * download when auto-download-liked is on; the Liked-mood playback path needs the flag alone
+     * so the mix-cache eviction can trust it.
+     */
+    suspend fun setLocalLiked(
+        videoId: String,
+        liked: Boolean,
+    )
+
     fun updateSongInLibrary(
         inLibrary: LocalDateTime,
         videoId: String,
