@@ -36,3 +36,8 @@ fun String.isRadioPlaylistId(): Boolean = RADIO_PLAYLIST_ID_PREFIXES.any { start
 fun String.isRadioQueueId(): Boolean = removePrefix("VL").startsWith("RD")
 
 fun String.isRadioMix(): Boolean = RADIO_MIX_ID_PREFIXES.any { startsWith(it) }
+
+/**
+ * Whether this playlist id represents the YouTube "Liked Music" playlist (e.g. "LM" or "VLLM").
+ */
+fun String.isLikedPlaylist(): Boolean = this == "LM" || this == "VLLM" || removePrefix("VL") == "LM"
