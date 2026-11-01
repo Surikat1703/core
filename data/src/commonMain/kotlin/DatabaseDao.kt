@@ -226,7 +226,12 @@ interface DatabaseDao {
     @Query("SELECT * FROM song ORDER BY inLibrary DESC LIMIT :limit OFFSET 0")
     suspend fun getAllSongs(limit: Int): List<SongEntity>
 
-    @Query("SELECT * FROM song WHERE liked = 1 ORDER BY favoriteAt DESC LIMIT :limit OFFSET :offset")
+    // Fork: LIMIT/OFFSET pagination is only correct when the ORDER BY is deterministic, so every
+    // paged song query below carries videoId (the primary key) as its final tie-breaker. Bulk
+    // imports write identical favoriteAt/downloadedAt timestamps; without a unique tie-breaker the
+    // row order between two pages is arbitrary and rows get skipped or duplicated — the offline
+    // library that "randomly" loses tracks.
+    @Query("SELECT * FROM song WHERE liked = 1 ORDER BY favoriteAt DESC, videoId LIMIT :limit OFFSET :offset")
     suspend fun getLikedSongs(
         limit: Int,
         offset: Int,
@@ -382,19 +387,24 @@ interface DatabaseDao {
         videoId: String,
     )
 
-    @Query("SELECT * FROM song WHERE downloadState = 3 LIMIT :limit OFFSET :offset")
+    // Fork: videoId tie-breaker — see getLikedSongs.
+    @Query("SELECT * FROM song WHERE downloadState = 3 ORDER BY downloadedAt DESC, videoId LIMIT :limit OFFSET :offset")
     suspend fun getDownloadedSongs(
         limit: Int,
         offset: Int,
     ): List<SongEntity>
 
-    @Query("SELECT * FROM song WHERE downloadState = 1 OR downloadState = 2 LIMIT :limit OFFSET :offset")
+    // Fork: videoId tie-breaker — see getLikedSongs.
+    @Query("SELECT * FROM song WHERE downloadState = 1 OR downloadState = 2 ORDER BY videoId LIMIT :limit OFFSET :offset")
     suspend fun getDownloadingSongs(
         limit: Int,
         offset: Int,
     ): List<SongEntity>
 
-    @Query("SELECT * FROM song WHERE videoId IN (:primaryKeyList) LIMIT 1000")
+    // Fork: no LIMIT here — a 1000-row cap silently truncated the offline resolution of any list
+    // longer than that (a liked library of 1052 lost 52 tracks). Callers chunk the id list, so
+    // SQLite's bind-variable ceiling is respected upstream of this query.
+    @Query("SELECT * FROM song WHERE videoId IN (:primaryKeyList)")
     suspend fun getSongByListVideoIdFull(primaryKeyList: List<String>): List<SongEntity>
 
     @Query("SELECT * FROM song WHERE videoId IN (:primaryKeyList) LIMIT 50 OFFSET :offset")
@@ -689,7 +699,7 @@ interface DatabaseDao {
     // Room's reader connections run under `PRAGMA query_only = 1`, which rejects it. See
     // `MusicDatabase.vacuum()`.
 
-    @Query("SELECT * FROM song WHERE downloadState = 1 OR downloadState = 2 ORDER BY downloadedAt ASC LIMIT :limit OFFSET :offset")
+    @Query("SELECT * FROM song WHERE downloadState = 1 OR downloadState = 2 ORDER BY downloadedAt ASC, videoId LIMIT :limit OFFSET :offset")
     suspend fun getPreparingSongs(
         limit: Int,
         offset: Int,
