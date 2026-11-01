@@ -59,6 +59,8 @@ interface SongRepository {
 
     fun insertSong(songEntity: SongEntity): Flow<Long>
 
+    suspend fun insertSongs(songEntities: List<SongEntity>)
+
     fun updateThumbnailsSongEntity(
         thumbnail: String,
         videoId: String,

@@ -43,6 +43,9 @@ import org.koin.mp.KoinPlatform.getKoin
 
 private const val TAG = "SongRepositoryImpl"
 
+/** Fork: ids per IN() batch — safely under SQLite's 999-variable ceiling. */
+private const val SQLITE_VARIABLE_CHUNK = 500
+
 internal class SongRepositoryImpl(
     private val dataStoreManager: DataStoreManager,
     private val localDataSource: LocalDataSource,
@@ -63,7 +66,14 @@ internal class SongRepositoryImpl(
             // SQLite's `WHERE videoId IN (:list)` does NOT preserve the input list order
             // (it returns rows in table/rowid order). Album tracks, local playlist items,
             // and queue snapshots all rely on caller-defined order, so we restore it here.
-            val songs = localDataSource.getSongByListVideoIdFull(listVideoId)
+            // Fork: the id list is chunked because SQLite's bind-variable ceiling (999 on the
+            // SQLite versions many devices still ship) fails a single IN() with thousands of
+            // ids — a 1052-track liked library used to come back truncated.
+            val songs = mutableListOf<SongEntity>()
+            listVideoId
+                .distinct()
+                .chunked(SQLITE_VARIABLE_CHUNK)
+                .forEach { chunk -> songs += localDataSource.getSongByListVideoIdFull(chunk) }
             val byId = songs.associateBy { it.videoId }
             emit(listVideoId.mapNotNull { byId[it] })
         }.flowOn(Dispatchers.IO)
@@ -221,6 +231,12 @@ internal class SongRepositoryImpl(
     override fun getSongAsFlow(id: String) = localDataSource.getSongAsFlow(id)
 
     override fun insertSong(songEntity: SongEntity): Flow<Long> = flow<Long> { emit(localDataSource.insertSong(songEntity)) }.flowOn(Dispatchers.IO)
+
+    override suspend fun insertSongs(songEntities: List<SongEntity>) {
+        withContext(Dispatchers.IO) {
+            localDataSource.insertSongs(songEntities)
+        }
+    }
 
     override fun updateThumbnailsSongEntity(
         thumbnail: String,
