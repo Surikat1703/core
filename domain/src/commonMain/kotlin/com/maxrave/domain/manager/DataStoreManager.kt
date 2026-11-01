@@ -53,6 +53,14 @@ interface DataStoreManager {
 
     suspend fun setMoodArtworkCache(json: String)
 
+    /**
+     * The AI's reading of the listener's taste behind the Library card, as serialized JSON. Null
+     * until the first reading, and set back to null when the listening history is cleared.
+     */
+    val tasteProfile: Flow<String?>
+
+    suspend fun setTasteProfile(json: String?)
+
     fun getString(key: String): Flow<String?>
 
     suspend fun putString(
@@ -63,10 +71,12 @@ interface DataStoreManager {
     val loggedIn: Flow<String>
     val cookie: Flow<String>
     val pageId: Flow<String>
+    val authUser: Flow<Int>
 
     suspend fun setCookie(
         cookie: String,
         pageId: String?,
+        authUser: Int = 0,
     )
 
     suspend fun setLoggedIn(logged: Boolean)
@@ -324,10 +334,6 @@ interface DataStoreManager {
 
     suspend fun setChartKey(key: String)
 
-    val translucentBottomBar: Flow<String>
-
-    suspend fun setTranslucentBottomBar(translucent: Boolean)
-
     val usingProxy: Flow<String>
 
     suspend fun setUsingProxy(usingProxy: Boolean)
@@ -426,10 +432,6 @@ interface DataStoreManager {
 
     suspend fun setKillServiceOnExit(kill: Boolean)
 
-    val keepServiceAlive: Flow<String>
-
-    suspend fun setKeepServiceAlive(keep: Boolean)
-
     val crossfadeEnabled: Flow<String>
 
     suspend fun setCrossfadeEnabled(enabled: Boolean)
@@ -463,9 +465,38 @@ interface DataStoreManager {
 
     suspend fun setAutoDownloadLikedSongs(enabled: Boolean)
 
+    /**
+     * Smart downloads (Android only) keep the songs played most, scored from local tracking,
+     * downloaded, and refresh them at most once a day when the app opens on an unmetered network.
+     * Off by default, for the same reason as [autoDownloadLikedSongs].
+     */
+    val smartDownloadsEnabled: Flow<String>
+
+    suspend fun setSmartDownloadsEnabled(enabled: Boolean)
+
+    /** How many songs Smart downloads keep: 25, 50 or 100. */
+    val smartDownloadsCount: Flow<Int>
+
+    suspend fun setSmartDownloadsCount(count: Int)
+
+    /** When Smart downloads last ran, in epoch milliseconds. 0 lets the next app open run them at once. */
+    val smartDownloadsLastRun: Flow<Long>
+
+    suspend fun setSmartDownloadsLastRun(time: Long)
+
     val youtubeSubtitleLanguage: Flow<String>
 
     suspend fun setYoutubeSubtitleLanguage(language: String)
+
+    /**
+     * Language code (e.g. "vi") of the audio track to prefer on videos that ship several — dubbed
+     * podcasts, mostly. Empty means the original track. Deliberately NOT defaulted to the app
+     * language the way [youtubeSubtitleLanguage] is: that would swap the speaker's own voice for an
+     * AI dub for every user whose app language has one.
+     */
+    val preferredAudioLanguage: Flow<String>
+
+    suspend fun setPreferredAudioLanguage(language: String)
 
     val helpBuildLyricsDatabase: Flow<String>
 

@@ -1,10 +1,12 @@
 package com.maxrave.data.repository
 
+import com.maxrave.data.mapping.toHomeContent
 import com.maxrave.data.parser.parseChart
 import com.maxrave.data.parser.parseGenreObject
 import com.maxrave.data.parser.parseMixedContent
 import com.maxrave.data.parser.parseMoodsMomentObject
 import com.maxrave.data.parser.parseNewRelease
+import com.maxrave.domain.data.model.home.BrowsePage
 import com.maxrave.domain.data.model.home.HomeItem
 import com.maxrave.domain.data.model.home.chart.Chart
 import com.maxrave.domain.data.model.mood.Mood
@@ -63,7 +65,7 @@ internal class HomeRepositoryImpl(
         params: String?,
         viewString: String,
         songString: String,
-    ): Flow<Resource<Pair<String?, List<HomeItem>>>> =
+    ): Flow<Resource<Triple<String?, List<HomeItem>, String?>>> =
         flow {
             runCatching {
                 val limit = dataStoreManager.homeLimit.first()
@@ -201,9 +203,10 @@ internal class HomeRepositoryImpl(
 //                                }
 //                        }
                         Logger.d("Repository", "List size: ${list.size}")
-                        emit(Resource.Success(continueParam to list.toList()))
+                        val background = result.background?.musicThumbnailRenderer?.getThumbnailUrl()
+                        emit(Resource.Success(Triple(continueParam, list.toList(), background)))
                     }.onFailure { error ->
-                        emit(Resource.Error<Pair<String?, List<HomeItem>>>(error.message.toString()))
+                        emit(Resource.Error<Triple<String?, List<HomeItem>, String?>>(error.message.toString()))
                     }
             }
         }.flowOn(Dispatchers.IO)
@@ -400,5 +403,39 @@ internal class HomeRepositoryImpl(
                         emit(Resource.Error<GenreObject>(e.message.toString()))
                     }
             }
+        }.flowOn(Dispatchers.IO)
+
+    override fun getBrowsePage(
+        browseId: String,
+        params: String?,
+        songString: String,
+    ): Flow<Resource<BrowsePage>> =
+        flow {
+            youTube
+                .browse(browseId = browseId, params = params, songString = songString)
+                .onSuccess { result ->
+                    emit(
+                        Resource.Success(
+                            BrowsePage(
+                                title = result.title,
+                                contents =
+                                    result.items
+                                        .flatMap { it.items }
+                                        .distinctBy { it.id }
+                                        .map { it.toHomeContent() },
+                                moods =
+                                    result.items.flatMap { it.moods }.map { item ->
+                                        MoodItem(
+                                            title = item.title,
+                                            params = item.endpoint.params ?: "",
+                                            stripeColor = item.stripeColor,
+                                        )
+                                    },
+                            ),
+                        ),
+                    )
+                }.onFailure { e ->
+                    emit(Resource.Error<BrowsePage>(e.message.toString()))
+                }
         }.flowOn(Dispatchers.IO)
 }

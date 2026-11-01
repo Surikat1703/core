@@ -20,6 +20,7 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -40,6 +41,7 @@ import coil3.request.ImageRequest
 import coil3.request.crossfade
 import com.maxrave.domain.data.model.metadata.Lyrics
 import com.maxrave.domain.data.model.streams.TimeLine
+import com.maxrave.domain.data.player.AppOnScreen
 import com.maxrave.domain.manager.DataStoreManager
 import com.maxrave.domain.mediaservice.handler.MediaPlayerHandler
 import com.simpmusic.media_jvm.mpv.MpvPlayer
@@ -55,6 +57,7 @@ fun MediaPlayerViewWithUrl(
     url: String,
     modifier: Modifier,
     cropToBounds: Boolean = false,
+    onFirstFrame: () -> Unit = {},
 ) {
     val scope = rememberCoroutineScope()
     var frameSource by remember { mutableStateOf<MpvVideoFrameSource?>(null) }
@@ -73,7 +76,7 @@ fun MediaPlayerViewWithUrl(
                 // mpv loops natively, so no end-of-file listener is needed.
                 player.setLooping(true)
                 frameSource = player.videoFrames
-                player.loadFile(url, startPaused = false)
+                player.loadFile(url, startPaused = !AppOnScreen.onScreen.value)
             }
         }
         onDispose {
@@ -87,6 +90,13 @@ fun MediaPlayerViewWithUrl(
     // instead of tearing down and re-creating the mpv handle.
     LaunchedEffect(mpvPlayer, cropToBounds) {
         mpvPlayer?.setPanscan(if (cropToBounds) 1.0 else 0.0)
+    }
+
+    // No window on screen: pause the loop instead of decoding frames nobody sees. A canvas has no
+    // audio, so MpvPlayer.setVideoSuspended would leave mpv nothing to play and it would end the file.
+    LaunchedEffect(mpvPlayer) {
+        val player = mpvPlayer ?: return@LaunchedEffect
+        AppOnScreen.onScreen.collect { onScreen -> if (onScreen) player.play() else player.pause() }
     }
 
     Box(
@@ -103,6 +113,7 @@ fun MediaPlayerViewWithUrl(
                     Modifier
                         .fillMaxSize()
                         .align(Alignment.Center),
+                onFirstFrame = onFirstFrame,
             )
         }
     }
@@ -128,6 +139,7 @@ fun MediaPlayerViewWithUrl(
 private fun MpvVideoFrames(
     source: MpvVideoFrameSource,
     modifier: Modifier = Modifier,
+    onFirstFrame: () -> Unit = {},
 ) {
     var frame by remember(source) { mutableStateOf<ImageBitmap?>(null) }
     LaunchedEffect(source) {
@@ -138,6 +150,12 @@ private fun MpvVideoFrames(
                 frame = image?.toComposeImageBitmap()
             }
         }
+    }
+    // Until a frame arrives this box is plain black, so tell the caller when it stops being.
+    val hasFrame = frame != null
+    val currentOnFirstFrame by rememberUpdatedState(onFirstFrame)
+    LaunchedEffect(hasFrame) {
+        if (hasFrame) currentOnFirstFrame()
     }
     Box(
         modifier
@@ -157,6 +175,17 @@ private fun MpvVideoFrames(
 }
 
 private val RICH_SYNC_TIMESTAMP_REGEX = Regex("""<\d{2}:\d{2}\.\d{2,3}>\s*""")
+
+/**
+ * Display aspect ratio of the video the main player is showing, or null while it has none.
+ * Follows the adapter's current handle, so a track change or crossfade re-points it by itself.
+ */
+@Composable
+fun rememberVideoAspectRatioJvm(): Float? {
+    val player: MpvPlayerAdapter = koinInject<MpvPlayerAdapter>()
+    val source = player.currentVideoFrames.collectAsState().value ?: return null
+    return source.aspectRatio.collectAsState().value
+}
 
 @Composable
 fun MediaPlayerViewWithSubtitleJvm(

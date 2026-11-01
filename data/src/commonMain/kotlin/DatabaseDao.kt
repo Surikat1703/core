@@ -9,6 +9,7 @@ import androidx.room.Transaction
 import androidx.room.Update
 import com.maxrave.domain.data.entities.AlbumEntity
 import com.maxrave.domain.data.entities.ArtistEntity
+import com.maxrave.domain.data.entities.ArtistMotionEntity
 import com.maxrave.domain.data.entities.AutoEqCurveEntity
 import com.maxrave.domain.data.entities.AutoEqEntryEntity
 import com.maxrave.domain.data.entities.AutoEqIndexMetaEntity
@@ -34,6 +35,7 @@ import com.maxrave.domain.data.entities.analytics.EventArtistEntity
 import com.maxrave.domain.data.entities.analytics.PlaybackEventEntity
 import com.maxrave.domain.data.entities.analytics.query.DecadeCount
 import com.maxrave.domain.data.entities.analytics.query.PlaybackSample
+import com.maxrave.domain.data.entities.analytics.query.SongPlaySample
 import com.maxrave.domain.data.entities.analytics.query.TopPlayedAlbum
 import com.maxrave.domain.data.entities.analytics.query.TopPlayedArtist
 import com.maxrave.domain.data.entities.analytics.query.TopPlayedArtistTime
@@ -41,6 +43,7 @@ import com.maxrave.domain.data.entities.analytics.query.TopPlayedTracks
 import com.maxrave.domain.data.type.PlaylistType
 import com.maxrave.domain.data.type.RecentlyType
 import com.maxrave.domain.extension.now
+import com.maxrave.domain.utils.LIVE_RESULT_TYPE
 import kotlinx.coroutines.flow.Flow
 import kotlinx.datetime.LocalDateTime
 
@@ -217,12 +220,6 @@ interface DatabaseDao {
     suspend fun insertSearchHistory(searchHistory: SearchHistory): Long
 
     // Song
-    @Query("SELECT * FROM song ORDER BY inLibrary DESC LIMIT :limit OFFSET :offset")
-    suspend fun getRecentSongs(
-        limit: Int,
-        offset: Int,
-    ): List<SongEntity>
-
     @Query("SELECT * FROM song ORDER BY inLibrary DESC LIMIT :limit OFFSET 0")
     suspend fun getAllSongs(limit: Int): List<SongEntity>
 
@@ -236,6 +233,22 @@ interface DatabaseDao {
         limit: Int,
         offset: Int,
     ): List<SongEntity>
+
+    /**
+     * Liked songs crediting [channelId] anywhere in their artist list — the "Liked songs" row on an
+     * artist's page and the list it opens (issue #2524).
+     *
+     * `artistId` is a converted `List<String>` stored as a JSON array, so the id is matched as a
+     * quoted token with the same `replace()` + ESCAPE '\' treatment as [deleteUnfollowedArtists]:
+     * channel ids contain `_`, which LIKE would otherwise read as a wildcard.
+     *
+     * A Flow, unlike [getLikedSongs], so liking or unliking a song updates the row straight away.
+     */
+    @Query(
+        "SELECT * FROM song WHERE liked = 1 AND artistId LIKE " +
+            "'%\"' || replace(replace(replace(:channelId, '\\', '\\\\'), '_', '\\_'), '%', '\\%') || '\"%' ESCAPE '\\'",
+    )
+    fun getLikedSongsByArtist(channelId: String): Flow<List<SongEntity>>
 
     @Query("SELECT * FROM song WHERE videoId = :videoId")
     suspend fun getSong(videoId: String): SongEntity?
@@ -371,8 +384,37 @@ interface DatabaseDao {
         videoId: String,
     ): Int
 
+    // `resultType` doubles as the live marker (LIVE_RESULT_TYPE). insertSong is IGNORE, so a row
+    // that already exists only learns it is live through these.
+    @Query("UPDATE song SET resultType = '$LIVE_RESULT_TYPE' WHERE videoId = :videoId")
+    suspend fun markSongLive(videoId: String): Int
+
+    // Clears the marker and nothing else: a row whose resultType holds some other label keeps it.
+    @Query("UPDATE song SET resultType = NULL WHERE videoId = :videoId AND resultType = '$LIVE_RESULT_TYPE'")
+    suspend fun unmarkSongLive(videoId: String): Int
+
     @Query("SELECT * FROM song WHERE totalPlayTime > 1 ORDER BY totalPlayTime DESC LIMIT 50")
     fun getMostPlayedSongs(): Flow<List<SongEntity>>
+
+    // Your library cards: a count and the newest artwork per collection, as Flows so a like, a
+    // follow or a finished download shows on the card straight away.
+    @Query("SELECT COUNT(*) FROM song WHERE liked = 1")
+    fun countLikedSongs(): Flow<Int>
+
+    @Query("SELECT thumbnails FROM song WHERE liked = 1 AND thumbnails IS NOT NULL ORDER BY favoriteAt DESC LIMIT :limit")
+    fun getLikedSongThumbnails(limit: Int): Flow<List<String?>>
+
+    @Query("SELECT COUNT(*) FROM song WHERE downloadState = 3")
+    fun countDownloadedSongs(): Flow<Int>
+
+    @Query("SELECT thumbnails FROM song WHERE downloadState = 3 AND thumbnails IS NOT NULL ORDER BY downloadedAt DESC LIMIT :limit")
+    fun getDownloadedSongThumbnails(limit: Int): Flow<List<String?>>
+
+    @Query("SELECT COUNT(*) FROM artist WHERE followed = 1")
+    fun countFollowedArtists(): Flow<Int>
+
+    @Query("SELECT thumbnails FROM artist WHERE followed = 1 AND thumbnails IS NOT NULL ORDER BY followedAt DESC LIMIT :limit")
+    fun getFollowedArtistThumbnails(limit: Int): Flow<List<String?>>
 
     @Query("UPDATE song SET downloadState = :downloadState, downloadedAt = :downloadedAt WHERE videoId = :videoId")
     suspend fun updateDownloadState(
@@ -380,6 +422,25 @@ interface DatabaseDao {
         videoId: String,
         downloadedAt: LocalDateTime? = if (downloadState == 3) now() else null,
     )
+
+    /** Songs holding [category], oldest download first. One still downloading has no date yet and sorts last. */
+    @Query("SELECT * FROM song WHERE category = :category ORDER BY downloadedAt IS NULL, downloadedAt")
+    suspend fun getSongsByCategory(category: String): List<SongEntity>
+
+    /** Returns how many rows changed, so a caller can tell the song row is gone. */
+    @Query("UPDATE song SET category = :category WHERE videoId = :videoId")
+    suspend fun updateSongCategory(
+        category: String?,
+        videoId: String,
+    ): Int
+
+    /** Drops [category] from songs that are no longer downloaded: removed by hand, or failed. */
+    @Query("UPDATE song SET category = NULL WHERE category = :category AND downloadState = 0")
+    suspend fun clearCategoryFromNotDownloaded(category: String): Int
+
+    /** Drops [category] from liked songs: the user keeps those once liked songs are auto-downloaded. */
+    @Query("UPDATE song SET category = NULL WHERE category = :category AND liked = 1")
+    suspend fun clearCategoryFromLiked(category: String): Int
 
     @Query("UPDATE song SET durationSeconds = :durationSeconds WHERE videoId = :videoId")
     suspend fun updateDurationSeconds(
@@ -447,6 +508,17 @@ interface DatabaseDao {
         nameLogoUrl: String?,
         nameLogoColor: String?,
     )
+
+    /**
+     * A row here means the artist has been *asked about*, not that they have a video — all four
+     * urls are null for the roughly two artists in five that Apple Music carries no motion for.
+     * Without that, the two requests behind it would run again on every visit to their page.
+     */
+    @Query("SELECT * FROM artist_motion WHERE channelId = :channelId")
+    suspend fun getArtistMotion(channelId: String): ArtistMotionEntity?
+
+    @Insert(onConflict = OnConflictStrategy.Companion.REPLACE)
+    suspend fun upsertArtistMotion(motion: ArtistMotionEntity)
 
     @Query("UPDATE artist SET followed = :followed, followedAt = :followedAt WHERE channelId = :channelId")
     suspend fun updateFollowed(
@@ -738,8 +810,25 @@ interface DatabaseDao {
     @Insert(onConflict = OnConflictStrategy.Companion.REPLACE)
     suspend fun insertSetVideoId(setVideoIdEntity: SetVideoIdEntity)
 
-    @Query("SELECT * FROM set_video_id WHERE videoId = :videoId")
-    suspend fun getSetVideoId(videoId: String): SetVideoIdEntity?
+    /**
+     * A setVideoId names one entry of one playlist, so the playlist is part of the key. Looked up by
+     * videoId alone, SQLite returned the row whose playlist id sorts first — an entry of whichever
+     * other playlist also holds the song. Pass every spelling the playlist id is stored under.
+     */
+    @Query(
+        "SELECT * FROM set_video_id WHERE videoId = :videoId AND youtubePlaylistId IN (:youtubePlaylistIds) " +
+            "AND setVideoId IS NOT NULL LIMIT 1",
+    )
+    suspend fun getSetVideoId(
+        videoId: String,
+        youtubePlaylistIds: List<String>,
+    ): SetVideoIdEntity?
+
+    @Query("DELETE FROM set_video_id WHERE videoId = :videoId AND youtubePlaylistId = :youtubePlaylistId")
+    suspend fun deleteSetVideoId(
+        videoId: String,
+        youtubePlaylistId: String,
+    )
 
     // PairSongLocalPlaylist
     @Insert(onConflict = OnConflictStrategy.Companion.REPLACE)
@@ -855,6 +944,36 @@ interface DatabaseDao {
         from: Int,
         to: Int,
     )
+
+    /**
+     * Move the song at [fromIndex] to [toIndex] (0-based, in position order) as ONE transaction.
+     *
+     * A move is a read, a range shift and a final placement. Run apart, the table sits between the
+     * shift and the placement with two songs on one position and a gap at the target: a process
+     * death there leaves it that way, and a second move reading it computes its range from
+     * positions that are about to change. As one transaction the three steps commit together or
+     * not at all, and a second move only reads once the first has committed.
+     *
+     * @return false when either index is outside the playlist.
+     */
+    @Transaction
+    suspend fun moveSongInPlaylist(
+        playlistId: Long,
+        fromIndex: Int,
+        toIndex: Int,
+    ): Boolean {
+        val pairs = getAllPlaylistPairSongByPosition(playlistId)
+        if (fromIndex !in pairs.indices || toIndex !in pairs.indices) return false
+        val moved = pairs[fromIndex]
+        val target = pairs[toIndex].position
+        if (fromIndex < toIndex) {
+            shiftPositionsBackward(playlistId, moved.position, target)
+        } else {
+            shiftPositionsForward(playlistId, target, moved.position)
+        }
+        editPositionOfSongInPlaylist(playlistId, moved.songId, target)
+        return true
+    }
 
     @Query(
         "SELECT * FROM pair_song_local_playlist WHERE playlistId = :playlistId AND position >= :from AND position < :to ORDER BY position " +
@@ -1042,7 +1161,11 @@ interface DatabaseDao {
                 ),
             )
 
-        channelIds.forEach { channelId ->
+        // A track can credit the same channel twice (YouTube lists it in both the artist and the
+        // featured runs). `event_artist` is keyed on (eventId, channelId), so the second insert
+        // aborts the whole transaction and the exception surfaces as a crash mid-playback (#2521).
+        // One play counts once per artist anyway.
+        channelIds.distinct().forEach { channelId ->
             insertEventArtist(
                 EventArtistEntity(
                     eventId = eventId,
@@ -1123,9 +1246,23 @@ interface DatabaseDao {
      * decides it here is the follow, not the row: the artists that statement spares are unfollowed
      * too, so their notifications go with the rest.
      * `artist.channelId` is NOT NULL, so the subquery cannot smuggle a NULL into the NOT IN.
+     * Blog rows are spared: their `channelId` is "", so without the type filter every one of them
+     * matched, and the RSS worker — which dedups against them — pushed recent posts a second time.
      */
-    @Query("DELETE FROM notification WHERE channelId NOT IN (SELECT channelId FROM artist WHERE followed = 1)")
+    @Query("DELETE FROM notification WHERE type = 'artist' AND channelId NOT IN (SELECT channelId FROM artist WHERE followed = 1)")
     suspend fun deleteNotificationsOfUnfollowedArtists(): Int
+
+    /**
+     * Cached Apple Music motion for an artist whose row the sweep has just removed.
+     *
+     * Keyed on the artist row rather than on the follow, unlike the two statements above: a motion
+     * row costs a few hundred bytes and is only ever read by that artist's page, so an artist kept
+     * because a liked or downloaded song credits them keeps their animated header too. Run AFTER
+     * [deleteUnfollowedArtists], or it measures against rows that are about to disappear.
+     * `artist.channelId` is NOT NULL, so the subquery cannot smuggle a NULL into the NOT IN.
+     */
+    @Query("DELETE FROM artist_motion WHERE channelId NOT IN (SELECT channelId FROM artist)")
+    suspend fun deleteOrphanedArtistMotion(): Int
 
     /** The new-releases tracking row for an artist the user no longer follows. See [deleteNotificationsOfUnfollowedArtists]. */
     @Query("DELETE FROM followed_artist_single_and_album WHERE channelId NOT IN (SELECT channelId FROM artist WHERE followed = 1)")
@@ -1375,6 +1512,10 @@ interface DatabaseDao {
         startTimestamp: LocalDateTime,
         endTimestamp: LocalDateTime,
     ): List<PlaybackSample>
+
+    /** Every play since [from], for the Smart downloads score. */
+    @Query("SELECT videoId, timestamp, durationSecond, listenedSecond FROM playback_event WHERE timestamp >= :from")
+    suspend fun getSongPlaysSince(from: LocalDateTime): List<SongPlaySample>
 
     @Query(
         "SELECT COUNT(DISTINCT videoId) FROM playback_event" +

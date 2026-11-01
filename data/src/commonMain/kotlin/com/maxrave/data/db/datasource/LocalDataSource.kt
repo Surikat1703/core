@@ -4,6 +4,7 @@ import DatabaseDao
 import com.maxrave.data.db.MusicDatabase
 import com.maxrave.domain.data.entities.AlbumEntity
 import com.maxrave.domain.data.entities.ArtistEntity
+import com.maxrave.domain.data.entities.ArtistMotionEntity
 import com.maxrave.domain.data.entities.AutoEqCurveEntity
 import com.maxrave.domain.data.entities.AutoEqEntryEntity
 import com.maxrave.domain.data.entities.AutoEqIndexMetaEntity
@@ -24,8 +25,10 @@ import com.maxrave.domain.data.entities.SongEntity
 import com.maxrave.domain.data.entities.SongInfoEntity
 import com.maxrave.domain.data.entities.TranslatedLyricsEntity
 import com.maxrave.domain.data.entities.YourYouTubePlaylistList
+import com.maxrave.domain.data.player.LiveStreamRegistry
 import com.maxrave.domain.extension.now
 import com.maxrave.domain.utils.FilterState
+import com.maxrave.domain.utils.isLive
 import kotlinx.datetime.LocalDateTime
 
 /** SQLite caps bind parameters per statement; stay well under it when deleting in bulk. */
@@ -64,11 +67,6 @@ internal class LocalDataSource(
 
     suspend fun getAllSongs(limit: Int) = databaseDao.getAllSongs(limit)
 
-    suspend fun getRecentSongs(
-        limit: Int,
-        offset: Int,
-    ) = databaseDao.getRecentSongs(limit, offset)
-
     suspend fun getSongByListVideoId(
         primaryKeyList: List<String>,
         offset: Int,
@@ -101,6 +99,8 @@ internal class LocalDataSource(
     suspend fun deleteAllPlaybackEvents() = databaseDao.deleteAllPlaybackEvents()
 
     suspend fun deleteUnfollowedArtists() = databaseDao.deleteUnfollowedArtists()
+
+    suspend fun deleteOrphanedArtistMotion() = databaseDao.deleteOrphanedArtistMotion()
 
     suspend fun deleteNotificationsOfUnfollowedArtists() = databaseDao.deleteNotificationsOfUnfollowedArtists()
 
@@ -156,7 +156,22 @@ internal class LocalDataSource(
         offset,
     )
 
+    fun getLikedSongsByArtist(channelId: String) = databaseDao.getLikedSongsByArtist(channelId)
+
     suspend fun getSong(videoId: String) = databaseDao.getSong(videoId)
+
+    suspend fun getSongPlaysSince(from: LocalDateTime) = databaseDao.getSongPlaysSince(from)
+
+    suspend fun getSongsByCategory(category: String) = databaseDao.getSongsByCategory(category)
+
+    suspend fun updateSongCategory(
+        videoId: String,
+        category: String?,
+    ) = databaseDao.updateSongCategory(category, videoId)
+
+    suspend fun clearCategoryFromNotDownloaded(category: String) = databaseDao.clearCategoryFromNotDownloaded(category)
+
+    suspend fun clearCategoryFromLiked(category: String) = databaseDao.clearCategoryFromLiked(category)
 
     fun getSongAsFlow(videoId: String) = databaseDao.getSongAsFlow(videoId)
 
@@ -198,8 +213,21 @@ internal class LocalDataSource(
                 )
             }
         }
+        // A row stored before its LIVE chip was seen learns it here, and so does one inserted just
+        // after its stream resolved — resolution (a precache, say) cannot mark a row that does not
+        // exist yet. Only raised, never cleared: a source that shows no chip has not said the
+        // broadcast ended.
+        if ((rowId == -1L && song.isLive) || (!song.isLive && LiveStreamRegistry.isLive(song.videoId))) {
+            databaseDao.markSongLive(song.videoId)
+        }
         return rowId
     }
+
+    /** Written from stream resolution, the one source that can also say a broadcast has ended. */
+    suspend fun updateSongLiveStatus(
+        videoId: String,
+        isLive: Boolean,
+    ) = if (isLive) databaseDao.markSongLive(videoId) else databaseDao.unmarkSongLive(videoId)
 
     /**
      * Batch counterpart of [insertSong], used by the importer.
@@ -250,6 +278,18 @@ internal class LocalDataSource(
 
     fun getMostPlayedSongs() = databaseDao.getMostPlayedSongs()
 
+    fun countLikedSongs() = databaseDao.countLikedSongs()
+
+    fun getLikedSongThumbnails(limit: Int) = databaseDao.getLikedSongThumbnails(limit)
+
+    fun countDownloadedSongs() = databaseDao.countDownloadedSongs()
+
+    fun getDownloadedSongThumbnails(limit: Int) = databaseDao.getDownloadedSongThumbnails(limit)
+
+    fun countFollowedArtists() = databaseDao.countFollowedArtists()
+
+    fun getFollowedArtistThumbnails(limit: Int) = databaseDao.getFollowedArtistThumbnails(limit)
+
     suspend fun updateDownloadState(
         downloadState: Int,
         videoId: String,
@@ -269,6 +309,10 @@ internal class LocalDataSource(
         nameLogoUrl: String?,
         nameLogoColor: String?,
     ) = databaseDao.updateArtistNameLogo(channelId, nameLogoUrl, nameLogoColor)
+
+    suspend fun getArtistMotion(channelId: String) = databaseDao.getArtistMotion(channelId)
+
+    suspend fun upsertArtistMotion(motion: ArtistMotionEntity) = databaseDao.upsertArtistMotion(motion)
 
     suspend fun updateFollowed(
         followed: Int,
@@ -462,7 +506,15 @@ internal class LocalDataSource(
 
     suspend fun insertSetVideoId(setVideoIdEntity: SetVideoIdEntity) = databaseDao.insertSetVideoId(setVideoIdEntity)
 
-    suspend fun getSetVideoId(videoId: String) = databaseDao.getSetVideoId(videoId)
+    suspend fun getSetVideoId(
+        videoId: String,
+        youtubePlaylistIds: List<String>,
+    ) = databaseDao.getSetVideoId(videoId, youtubePlaylistIds)
+
+    suspend fun deleteSetVideoId(
+        videoId: String,
+        youtubePlaylistId: String,
+    ) = databaseDao.deleteSetVideoId(videoId, youtubePlaylistId)
 
     suspend fun insertPairSongLocalPlaylist(pairSongLocalPlaylist: PairSongLocalPlaylist) =
         databaseDao.insertPairSongLocalPlaylist(pairSongLocalPlaylist)
@@ -543,6 +595,12 @@ internal class LocalDataSource(
     }
 
     suspend fun getNewestPlaylistPairSong(playlistId: Long) = databaseDao.getNewestPlaylistPairSong(playlistId)
+
+    suspend fun moveSongInPlaylist(
+        playlistId: Long,
+        fromIndex: Int,
+        toIndex: Int,
+    ) = databaseDao.moveSongInPlaylist(playlistId, fromIndex, toIndex)
 
     suspend fun editPositionOfSongInPlaylist(
         playlistId: Long,
