@@ -282,6 +282,14 @@ internal class MediaServiceHandlerImpl(
     @Volatile
     private var restoreHasPrimedPlayer = false
 
+    // Fork: a user-started queue must win over the startup restore. reset() is what every
+    // explicit queue switch calls first, so it raises this flag; restoreSavedQueue checks it
+    // at its decision points and steps aside instead of pouring the saved queue back in
+    // over the one the user just asked for (which used to resume the OLD queue from its
+    // saved middle-of-the-list position).
+    @Volatile
+    private var restoreCancelled = false
+
     private var songEntityJob: Job? = null
 
     private var jobWatchtime: Job? = null
@@ -1812,6 +1820,8 @@ internal class MediaServiceHandlerImpl(
     }
 
     override fun reset() {
+        // Fork: an explicit queue switch cancels a startup restore that is still in flight.
+        restoreCancelled = true
         _queueData.value = QueueData()
     }
 
@@ -2482,6 +2492,8 @@ internal class MediaServiceHandlerImpl(
      */
     private suspend fun restoreSavedQueue(playWhenReady: Boolean): Boolean =
         restoreQueueMutex.withLock {
+            // Fork: the user started something of their own while the restore was pending.
+            if (restoreCancelled) return@withLock false
             if (player.mediaItemCount > 0) {
                 // Already restored, or the app was running all along.
                 if (playWhenReady || playRequestedDuringRestore) requestPlayWhenReady()
@@ -2516,6 +2528,9 @@ internal class MediaServiceHandlerImpl(
                 } else {
                     savedTracks.toCollection(arrayListOf())
                 }
+            // Fork: the user may have started their own queue while the saved list was being
+            // fetched - their queue wins, the restore stands down.
+            if (restoreCancelled) return@withLock false
             setQueueData(
                 QueueData.Data(
                     listTracks = listTracks,
