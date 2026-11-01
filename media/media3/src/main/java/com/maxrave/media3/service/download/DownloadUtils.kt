@@ -270,6 +270,16 @@ internal class DownloadUtils(
             id,
             false,
         )
+        // Fork: DownloadManager.removeDownload erases the index entry only — the manager holds no
+        // Cache reference at all, so the cached spans stay on disk. Without this, every removal
+        // (the user's own or the My Mix rotation) leaked its file into filesDir/download forever,
+        // which is how the app grew to gigabytes past its actual download count.
+        coroutineScope.launch {
+            runCatching {
+                downloadCache.removeResource(videoId)
+                downloadCache.removeResource(id)
+            }
+        }
     }
 
     override fun removeAllDownloads() {
@@ -277,6 +287,14 @@ internal class DownloadUtils(
         _downloadTask.value = emptyMap()
         downloadingVideoIds.value = mutableSetOf()
         downloadManager.removeAllDownloads()
+        // Fork: same gap as removeDownload — removeAllDownloads drops the index, not the files.
+        coroutineScope.launch {
+            runCatching {
+                downloadCache.keys.toList().forEach { key ->
+                    downloadCache.removeResource(key)
+                }
+            }
+        }
     }
 
     init {
@@ -354,6 +372,22 @@ internal class DownloadUtils(
                 }
         }
         _downloads.value = result
+        // Fork: removals used to leave their cached spans behind (see removeDownload), so the
+        // download cache carries orphaned files from every past removal and My Mix rotation.
+        // Anything on disk the index does not know is such an orphan. Both sides are loaded by
+        // this point and nothing new has been queued yet; deletions run off the main thread so
+        // Koin's eager creation is not blocked on file IO. Files of in-progress downloads are
+        // safe: they carry an index entry, so they are never in the orphan set.
+        val activeKeys = result.keys
+        coroutineScope.launch {
+            val orphans = downloadCache.keys.filter { it !in activeKeys }
+            if (orphans.isNotEmpty()) {
+                Logger.w("DownloadUtils", "Sweeping ${orphans.size} orphaned download file(s)")
+                orphans.forEach { key ->
+                    runCatching { downloadCache.removeResource(key) }
+                }
+            }
+        }
         downloadManager.addListener(
             object : DownloadManager.Listener {
                 override fun onDownloadChanged(

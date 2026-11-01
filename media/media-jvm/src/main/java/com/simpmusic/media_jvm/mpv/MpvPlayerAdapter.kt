@@ -561,6 +561,24 @@ class MpvPlayerAdapter(
         }
     }
 
+    override fun addMediaItems(mediaItems: List<GenericMediaItem>) {
+        if (mediaItems.isEmpty()) return
+        playlist.addAll(mediaItems)
+
+        if (internalShuffleModeEnabled) {
+            createShuffleOrder()
+        }
+
+        notifyTimelineChanged("TIMELINE_CHANGE_REASON_PLAYLIST_CHANGED")
+
+        if (playlist.size - 1 - currentMediaItemIndex <= maxPrecacheCount) {
+            coroutineScope.launch {
+                clearPrecacheExceptCurrentInternal()
+                triggerPrecachingInternal()
+            }
+        }
+    }
+
     override fun addMediaItem(
         index: Int,
         mediaItem: GenericMediaItem,

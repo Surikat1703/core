@@ -51,6 +51,10 @@ interface MediaPlayerInterface {
         mediaItem: GenericMediaItem,
     )
 
+    fun addMediaItems(mediaItems: List<GenericMediaItem>) {
+        mediaItems.forEach { addMediaItem(it) }
+    }
+
     fun removeMediaItem(index: Int)
 
     fun moveMediaItem(

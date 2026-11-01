@@ -90,6 +90,15 @@ class ExoPlayerAdapter(
         notifyTimelineChanged("TIMELINE_CHANGE_REASON_PLAYLIST_CHANGED")
     }
 
+    override fun addMediaItems(mediaItems: List<GenericMediaItem>) {
+        if (mediaItems.isEmpty()) return
+        exoPlayer.addMediaItems(mediaItems.map { it.toMedia3MediaItem() })
+        if (shuffleModeEnabled) {
+            createShuffleOrder()
+        }
+        notifyTimelineChanged("TIMELINE_CHANGE_REASON_PLAYLIST_CHANGED")
+    }
+
     override fun addMediaItem(
         index: Int,
         mediaItem: GenericMediaItem,
