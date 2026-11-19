@@ -291,6 +291,12 @@ internal class MediaServiceHandlerImpl(
     private var restoreCancelled = false
     private var restoreQueueJob: Job? = null
 
+    // Tracks whether the user explicitly toggled shuffle during the session. If false,
+    // temporary disabling of shuffle when starting a playlist from the beginning will not
+    // overwrite the user's global shuffle preference in DataStore.
+    @Volatile
+    private var userExplicitlyToggledShuffle = false
+
     private var songEntityJob: Job? = null
 
     private var jobWatchtime: Job? = null
@@ -1108,6 +1114,7 @@ internal class MediaServiceHandlerImpl(
             }
 
             PlayerEvent.Shuffle -> {
+                userExplicitlyToggledShuffle = true
                 if (player.shuffleModeEnabled) {
                     player.shuffleModeEnabled = false
                     _controlState.value = _controlState.value.copy(isShuffle = false)
@@ -1758,6 +1765,13 @@ internal class MediaServiceHandlerImpl(
                 data = queueData,
             )
         }
+        // When setting a brand-new queue starting from track #0 (e.g. "Любимые треки" / playlist start,
+        // but not when restoring saved queue), disable shuffle so playback starts deterministically
+        // with the first track of the queue instead of randomizing the order.
+        if (queueData.playlistId != LOCAL_PLAYLIST_ID_SAVED_QUEUE && initialIndex == 0 && player.shuffleModeEnabled) {
+            player.shuffleModeEnabled = false
+            _controlState.value = _controlState.value.copy(isShuffle = false)
+        }
         // Snapshot which tracks came from the album, for the crossfade rule. Taken at load time
         // because endless queue appends to this same queue afterwards, and those additions are not
         // album tracks — that boundary is exactly where crossfade should resume.
@@ -2261,6 +2275,12 @@ internal class MediaServiceHandlerImpl(
         songRepository.insertSong(track.toSongEntity()).singleOrNull()?.let {
             Logger.d(TAG, "Inserted song: ${track.title}")
         }
+        // When starting a playlist from the beginning, ensure shuffle is disabled before media items
+        // are set so that ExoPlayer/CrossfadeAdapter does not shuffle the initial track.
+        if (type == PLAYLIST_CLICK && (index == 0 || index == null) && player.shuffleModeEnabled) {
+            player.shuffleModeEnabled = false
+            _controlState.value = _controlState.value.copy(isShuffle = false)
+        }
         clearMediaItems()
         track.durationSeconds?.let {
             songRepository.updateDurationSeconds(it, track.videoId)
@@ -2419,8 +2439,16 @@ internal class MediaServiceHandlerImpl(
     override fun mayBeSavePlaybackState() {
         if (runBlocking { dataStoreManager.saveStateOfPlayback.first() } == TRUE) {
             runBlocking {
+                // If the user did not explicitly toggle shuffle by hand during this session,
+                // leave their global shuffle preference untouched in DataStore.
+                val shuffleToSave =
+                    if (userExplicitlyToggledShuffle) {
+                        player.shuffleModeEnabled
+                    } else {
+                        dataStoreManager.shuffleKey.first() == TRUE
+                    }
                 dataStoreManager.recoverShuffleAndRepeatKey(
-                    player.shuffleModeEnabled,
+                    shuffleToSave,
                     player.repeatMode,
                 )
             }
