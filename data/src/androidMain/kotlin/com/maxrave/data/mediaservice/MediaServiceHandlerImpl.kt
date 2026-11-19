@@ -289,6 +289,7 @@ internal class MediaServiceHandlerImpl(
     // saved middle-of-the-list position).
     @Volatile
     private var restoreCancelled = false
+    private var restoreQueueJob: Job? = null
 
     private var songEntityJob: Job? = null
 
@@ -1748,6 +1749,10 @@ internal class MediaServiceHandlerImpl(
     }
 
     override fun setQueueData(queueData: QueueData.Data) {
+        val initialIndex = queueData.listTracks.indexOfFirst {
+            it.videoId == queueData.firstPlayedTrack?.videoId
+        }.coerceAtLeast(0)
+        _currentSongIndex.value = initialIndex
         _queueData.update {
             it.copy(
                 data = queueData,
@@ -1822,6 +1827,8 @@ internal class MediaServiceHandlerImpl(
     override fun reset() {
         // Fork: an explicit queue switch cancels a startup restore that is still in flight.
         restoreCancelled = true
+        restoreQueueJob?.cancel()
+        _currentSongIndex.value = 0
         _queueData.value = QueueData()
     }
 
@@ -2421,15 +2428,18 @@ internal class MediaServiceHandlerImpl(
     }
 
     override fun mayBeRestoreQueue() {
-        coroutineScope.launch {
-            // Fork: give the service a moment to settle before restoring, and honour the
-            // "save recent song and queue" setting - upstream's refactor always restores.
-            delay(1200)
-            if (player.isPlaying || player.currentMediaItem != null) return@launch
-            if (dataStoreManager.saveRecentSongAndQueue.first() == TRUE) {
-                restoreSavedQueue(playWhenReady = false)
+        restoreQueueJob?.cancel()
+        restoreQueueJob =
+            coroutineScope.launch {
+                // Fork: give the service a moment to settle before restoring, and honour the
+                // "save recent song and queue" setting - upstream's refactor always restores.
+                delay(1200)
+                if (restoreCancelled) return@launch
+                if (player.isPlaying || player.currentMediaItem != null) return@launch
+                if (dataStoreManager.saveRecentSongAndQueue.first() == TRUE) {
+                    restoreSavedQueue(playWhenReady = false)
+                }
             }
-        }
     }
 
     override suspend fun restoreQueueAndPlay(): Boolean {
@@ -2560,12 +2570,15 @@ internal class MediaServiceHandlerImpl(
             // and one that arrives after this point finds the player primed and starts it there.
             restoreHasPrimedPlayer = true
             if (playWhenReady || playRequestedDuringRestore) requestPlayWhenReady()
+            if (restoreCancelled) return@withLock false
             loadPlaylistOrAlbum(index = index)
             loadJob?.join()
+            if (restoreCancelled) return@withLock false
             resetCrossfade()
             // Only a paused restore still needs this. While playing, the position set above has
             // moved on during the load, and seeking back to savedPosition would rewind it.
             if (!(playWhenReady || playRequestedDuringRestore)) player.seekTo(index, savedPosition)
+            if (restoreCancelled) return@withLock false
             // Announce the restored position once. Nothing plays after a restore
             // (playWhenReady = false above), and startProgressUpdate only runs while
             // isPlaying — so no state is ever published and the UI sits at 0:00 on a
