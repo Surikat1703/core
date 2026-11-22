@@ -125,11 +125,34 @@ internal class SongRepositoryImpl(
 
     override fun getLikedSongs(): Flow<List<SongEntity>> =
         flow {
-            emit(
+            val allLiked =
                 getFullDataFromDB { limit, offset ->
                     localDataSource.getLikedSongs(limit, offset)
-                },
-            )
+                }
+            // Fork: when the YouTube "Liked Music" playlist (LM) is cached, sort by its canonical
+            // order (newest liked songs first) so the offline queue begins at row 0 of the user's
+            // liked list instead of an inverted or arbitrary timestamp slice.
+            val lmTrackIds = localDataSource.getPlaylist("LM")?.tracks
+            if (!lmTrackIds.isNullOrEmpty()) {
+                val likedMap = allLiked.associateBy { it.videoId }
+                val ordered = ArrayList<SongEntity>(allLiked.size)
+                val seen = HashSet<String>(allLiked.size)
+                for (id in lmTrackIds) {
+                    val song = likedMap[id]
+                    if (song != null) {
+                        ordered.add(song)
+                        seen.add(id)
+                    }
+                }
+                for (song in allLiked) {
+                    if (song.videoId !in seen) {
+                        ordered.add(song)
+                    }
+                }
+                emit(ordered)
+            } else {
+                emit(allLiked)
+            }
         }.flowOn(Dispatchers.IO)
 
     override suspend fun downloadAllLikedSongs(): Int =

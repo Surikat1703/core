@@ -268,7 +268,14 @@ interface DatabaseDao {
         videoId: String,
     ): Int
 
-    @Query("UPDATE song SET liked = :liked, favoriteAt = :favoriteAt WHERE videoId = :videoId")
+    // Fork: preserve existing favoriteAt when marking as liked. Overwriting favoriteAt on bulk
+    // updates (e.g. setLocalLiked) stamps sequentially increasing timestamps across the queue,
+    // inverting the chronological order of liked songs.
+    @Query(
+        "UPDATE song SET liked = :liked, " +
+            "favoriteAt = CASE WHEN :liked = 0 THEN NULL WHEN favoriteAt IS NOT NULL THEN favoriteAt ELSE :favoriteAt END " +
+            "WHERE videoId = :videoId",
+    )
     suspend fun updateLiked(
         liked: Int,
         videoId: String,
